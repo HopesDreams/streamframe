@@ -64,10 +64,6 @@ mvn install
 </dependency>
 ```
 
-> This repository targets the GitHub account `HopesDreams` and the repository name `streamframe`.
-> Maven `groupId` and the Java package use lowercase `hopesdreams` by Java naming convention.
-> If you fork under another account, update `pom.xml`, the package declarations, and both README files.
-
 ## Quick start
 
 ### Server
