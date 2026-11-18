@@ -57,11 +57,20 @@ mvn install
 ```
 
 ```xml
-<dependency>
-    <groupId>io.github.hopesdreams</groupId>
-    <artifactId>streamframe</artifactId>
-    <version>0.1.0</version>
-</dependency>
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
+<dependencies>
+    <dependency>
+        <groupId>com.github.HopesDreams</groupId>
+        <artifactId>streamframe</artifactId>
+        <version>aa830ae</version>
+    </dependency>
+</dependencies>
 ```
 
 ## 快速开始
