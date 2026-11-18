@@ -1,0 +1,25 @@
+# Build output
+target/
+out/
+.build/
+.tools/
+.m2repo/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+
+# Logs and crash dumps
+*.log
+hs_err_pid*
