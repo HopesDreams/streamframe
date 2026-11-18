@@ -64,10 +64,6 @@ mvn install
 </dependency>
 ```
 
-> 本仓库面向 GitHub 账号 `HopesDreams`，仓库名为 `streamframe`。
-> Maven `groupId` 和 Java 包名按 Java 命名惯例使用小写 `hopesdreams`。
-> 如果要在其他账号下发布，请同步修改 `pom.xml`、源码包名和两个 README 文件。
-
 ## 快速开始
 
 ### 服务端
