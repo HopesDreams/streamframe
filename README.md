@@ -4,7 +4,7 @@
 
 [![Java 8+](https://img.shields.io/badge/Java-8%2B-blue.svg)](#requirements)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Protocol v3](https://img.shields.io/badge/protocol-v3-blueviolet.svg)](#protocol)
+[![Protocol v4](https://img.shields.io/badge/protocol-v4-blueviolet.svg)](#protocol)
 
 A small, dependency-free TCP protocol and Java library for **framed request/response with streaming output**.
 
@@ -26,6 +26,8 @@ No framing code, no manual byte counts, no `END` bookkeeping in application code
 - Length-prefixed binary frames with a magic header and tail.
 - Request/response, plus multi-frame streaming responses.
 - Automatic stream IDs, sequence numbers, `END` and `ERROR` handling.
+- Standard numeric ERROR codes with a typed `ProtocolException`.
+- Retryability helpers for transient overload errors.
 - Incremental payload reading: process bytes before the whole frame arrives.
 - UTF-8-friendly byte escaping for binary safety.
 - Timezone-aware 8-byte timestamps (15-minute UTC-offset units).
@@ -131,6 +133,21 @@ Goodbye!
 
 The response is sent as three `DATA` frames followed by an `END` frame.
 
+### Bundled server limits
+
+The demo server is intentionally small, but it uses bounded resources:
+
+- worker pool: 16 core threads, 64 maximum threads, 128 queued tasks;
+- at most 256 active connections;
+- 30-second idle read timeout;
+- `TCP_NODELAY` and `SO_KEEPALIVE`;
+- two-phase graceful shutdown (wait up to 5 seconds for workers, then close active sockets).
+
+Tune the constants in
+[`StreamingServer`](src/main/java/io/github/hopesdreams/streamframe/demo/StreamingServer.java)
+for your workload. Java blocking sockets do not expose a write timeout, so slow
+readers are handled by TCP backpressure.
+
 ## High-level API
 
 The main entry point is [`ProtocolConnection`](src/main/java/io/github/hopesdreams/streamframe/ProtocolConnection.java).
@@ -144,7 +161,8 @@ The main entry point is [`ProtocolConnection`](src/main/java/io/github/hopesdrea
 | `Request.reply()` | Create the one allowed reply stream for a request. |
 | `Reply.write(String)` / `write(byte[])` | Send one `DATA` frame (automatically chunked above 64 KiB). |
 | `Reply.end()` / `Reply.close()` | Send `END`. |
-| `Reply.error(String)` | Send `ERROR` and terminate the stream. |
+| `Reply.error(String)` | Send `ERROR` with `UNSPECIFIED` and terminate the stream. |
+| `Reply.error(int, String)` | Send `ERROR` with a standard error code. |
 | `Response.read(...)` | Read response bytes across frames. |
 | `Response.copyTo(OutputStream)` | Stream the response to an output stream, flushing per chunk. |
 | `Response.close()` | Drain the remaining response so the connection stays usable. |
@@ -153,7 +171,7 @@ Important behavior:
 
 - A `Response` is a byte stream. It may span multiple `DATA` frames.
 - Reading until `-1` means the server sent `END`.
-- An `ERROR` frame is surfaced as an `IOException` containing the server message.
+- An `ERROR` frame is surfaced as a `ProtocolException` carrying the numeric code and server message.
 - Closing a partially-read `Response` drains the rest of that response.
 - Requests and responses on one connection are sequential. Read or close the previous response
   before starting the next request.
@@ -188,12 +206,12 @@ stays aligned.
 
 ## Protocol
 
-StreamFrame protocol version **3**. All multi-byte integers listed below are big-endian.
+StreamFrame protocol version **4**. All multi-byte integers listed below are big-endian.
 
 | Field | Value | Size |
 |---|---|---|
 | Magic header | `0xAA 0xBB` | 2 |
-| Version | `0x00 0x03` | 2 |
+| Version | `0x00 0x04` | 2 |
 | Compression | `0x00` = none | 1 |
 | Timestamp | year(2), month, day, hour, minute, second, timezone | 8 |
 | Frame type | `0x01` DATA, `0x02` END, `0x03` ERROR, `0x10` REQUEST | 1 |
@@ -255,16 +273,77 @@ This covers whole-hour, half-hour, and 45-minute timezones.
 - Sequence numbers start at 0 per stream and direction, increment by one per frame, and wrap
   from `0xFFFFFFFF` to `0`.
 
+### ERROR payload and error codes
+
+An ERROR frame's payload is:
+
+| Field | Size |
+|---|---|
+| Error code (unsigned big-endian) | 2 |
+| UTF-8 error message | remaining bytes |
+
+Codes defined by the library:
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0x0000` | `UNSPECIFIED` | No specific error code. |
+| `0x0001` | `PROTOCOL_ERROR` | Malformed frame, invalid sequence, or wire-level violation. |
+| `0x0002` | `INVALID_REQUEST` | A valid frame was rejected as a request. |
+| `0x0003` | `SERVER_BUSY` | Server is overloaded or out of capacity. |
+| `0x0004` | `INTERNAL_ERROR` | Unexpected server-side failure. |
+| `0x0005` | `TIMEOUT` | Operation or connection timed out. |
+| `0x0006` | `STREAM_ABORTED` | Stream was cancelled before END. |
+| `0x0007` | `UNSUPPORTED` | Requested version, feature, or operation is unsupported. |
+| `0x0008` | `PAYLOAD_TOO_LARGE` | Payload exceeds the allowed size. |
+
+Applications may use `0x0100-0xFFFF` for their own error codes.
+
+### Overload and retries
+
+StreamFrame distinguishes two overload levels:
+
+- **Connection-level overload** — the server has not read a REQUEST yet (connection
+  limit or worker queue full). `StreamingServer` intentionally closes the TCP
+  connection. There is no request stream to attach an ERROR frame to. Clients should
+  retry idempotent requests with exponential backoff and jitter.
+- **Request-level overload** — the server has read the REQUEST but cannot process it
+  now. Use `reply.error(ErrorCode.SERVER_BUSY, "...")`. The client receives a
+  `ProtocolException`; `isRetryable()` returns `true`.
+
+```java
+long delay = 100;
+for (int attempt = 0; attempt < 5; attempt++) {
+    try (ProtocolConnection c = ProtocolConnection.connect(host, port);
+         ProtocolConnection.Response r = c.request("read-only")) {
+        r.copyTo(System.out);
+        return;
+    } catch (ProtocolException e) {
+        if (!e.isRetryable()) {
+            throw e;
+        }
+    } catch (IOException e) {
+        // Connection-level failure: retry only idempotent operations.
+    }
+    Thread.sleep(delay);
+    delay = Math.min(delay * 2, 5000);
+}
+```
+
+Do not retry non-idempotent requests automatically. For streaming responses, stop
+retrying once output has started, otherwise the caller may see duplicated data.
+
 ## Error handling and limits
 
 - I/O and high-level protocol failures are reported as `IOException`.
 - Low-level invalid frame construction/parsing throws `IllegalArgumentException`.
-- A server `ERROR` frame reaches a high-level client as an `IOException` with the server text.
+- A server `ERROR` frame reaches a high-level client as a `ProtocolException` with `getErrorCode()`,
+  `getErrorName()`, and `getServerMessage()`.
 - Compression is reserved; only `0x00` (none) is supported.
 - One encoded frame is capped at 1 MiB. `Reply.write` automatically splits large data into
   multiple `DATA` frames.
 - The library does not provide TLS, authentication, heartbeats, retries, or multiplexing.
   Put it behind TLS or add those features in your application.
+- Java blocking sockets do not provide a write timeout; slow readers rely on TCP backpressure.
 
 ## Project layout
 
@@ -272,12 +351,15 @@ This covers whole-hour, half-hour, and 45-minute timezones.
 src/main/java/io/github/hopesdreams/streamframe/
 ├── ProtocolConnection.java   high-level API
 ├── SocketFrame.java          frame codec and incremental reader
+├── ErrorCode.java            standard ERROR codes
+├── ProtocolException.java    ERROR frame exception with code
 ├── package-info.java
 └── demo/
     ├── StreamingServer.java
     ├── StreamingClient.java
     └── package-info.java
 src/test/java/io/github/hopesdreams/streamframe/
+├── ErrorCodeTest.java
 ├── ProtocolConnectionTest.java
 └── SocketFrameTest.java
 ```

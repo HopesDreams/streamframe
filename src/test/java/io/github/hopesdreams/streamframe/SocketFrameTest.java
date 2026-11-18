@@ -53,7 +53,7 @@ class SocketFrameTest {
         assertEquals(0xAA, bytes[0] & 0xFF);
         assertEquals(0xBB, bytes[1] & 0xFF);
         assertEquals(0x00, bytes[2] & 0xFF);
-        assertEquals(0x03, bytes[3] & 0xFF);
+        assertEquals(0x04, bytes[3] & 0xFF);
         assertEquals(0x00, bytes[4] & 0xFF);
         assertEquals(SocketFrame.TYPE_DATA, bytes[13] & 0xFF);
         assertEquals(streamId, readUnsignedInt(bytes, 14));
@@ -87,9 +87,12 @@ class SocketFrameTest {
         assertEquals(0, end.getPayloadLength());
         assertEquals(SocketFrame.FIXED_LENGTH, end.getBytes().length);
 
-        SocketFrame error = SocketFrame.error(7, 3, "boom");
+        SocketFrame error = SocketFrame.error(7, 3, ErrorCode.SERVER_BUSY, "boom");
         assertEquals(SocketFrame.TYPE_ERROR, error.getType());
-        assertEquals("boom", error.getPayloadAsString());
+        assertEquals(ErrorCode.SERVER_BUSY, error.getErrorCode());
+        assertEquals("boom", error.getErrorMessage());
+        assertEquals(ErrorCode.UNSPECIFIED,
+                SocketFrame.error(7, 4, "plain").getErrorCode());
 
         for (SocketFrame frame : new SocketFrame[]{request, data, end, error}) {
             SocketFrame parsed = new SocketFrame(frame.getBytes());
@@ -246,6 +249,10 @@ class SocketFrameTest {
         endWithPayload[13] = SocketFrame.TYPE_END;
         expectFrameRejected(endWithPayload);
 
+        byte[] errorWithoutCode = SocketFrame.data(1, 0, "x").getBytes();
+        errorWithoutCode[13] = SocketFrame.TYPE_ERROR;
+        expectFrameRejected(errorWithoutCode);
+
         byte[] badEscape = SocketFrame.data(1, 0, new byte[]{0x00, 0x00}).getBytes();
         badEscape[SocketFrame.PREFIX_LENGTH] = (byte) 0xCD;
         badEscape[SocketFrame.PREFIX_LENGTH + 1] = 0x00;
@@ -281,6 +288,8 @@ class SocketFrameTest {
         assertThrows(IllegalArgumentException.class, () -> SocketFrame.data(1, -1, "x"));
         assertThrows(IllegalArgumentException.class,
                 () -> SocketFrame.nextSequence(0x100000000L));
+        assertThrows(IllegalArgumentException.class,
+                () -> SocketFrame.error(1, 0, 0x10000, "x"));
     }
 
     @Test

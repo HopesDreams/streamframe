@@ -148,17 +148,19 @@ class ProtocolConnectionTest {
                 assertNotNull(request, "request");
                 try (ProtocolConnection.Reply reply = request.reply()) {
                     reply.write("partial");
-                    reply.error("boom");
+                    reply.error(ErrorCode.SERVER_BUSY, "boom");
                 }
             }, error);
 
             try (ProtocolConnection connection = connect(server.getLocalPort());
                  ProtocolConnection.Response response = connection.request("error")) {
                 ByteArrayOutputStream received = new ByteArrayOutputStream();
-                IOException exception = assertThrows(IOException.class,
+                ProtocolException exception = assertThrows(ProtocolException.class,
                         () -> response.copyTo(received));
-                assertTrue(exception.getMessage() != null
-                        && exception.getMessage().contains("boom"));
+                assertEquals(ErrorCode.SERVER_BUSY, exception.getErrorCode());
+                assertEquals("SERVER_BUSY", exception.getErrorName());
+                assertEquals("boom", exception.getServerMessage());
+                assertTrue(exception.getMessage().contains("boom"));
                 assertEquals("partial",
                         new String(received.toByteArray(), StandardCharsets.UTF_8));
             }

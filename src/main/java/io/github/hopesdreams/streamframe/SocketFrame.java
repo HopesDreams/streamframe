@@ -37,7 +37,7 @@ import java.util.Objects;
  * <pre>
  * | 字段     | 值        | 长度     |
  * | 通信头   | 0xAA 0xBB | 2 字节   |
- * | 版本号   | 0x00 0x03 | 2 字节   |
+ * | 版本号   | 0x00 0x04 | 2 字节   |
  * | 压缩算法 | 0xnn      | 1 字节   |
  * | 时间戳   | /         | 8 字节   |
  * | 帧类型   | 0xnn      | 1 字节   |
@@ -58,6 +58,9 @@ import java.util.Objects;
  * 连续发送数据块，最后用 END 结束流。流 ID 和序号都是 4 字节无符号
  * 大端整数；同一流同一方向内，序号从 0 开始逐帧加 1，到达
  * 0xFFFFFFFF 后回绕。</p>
+ *
+ * <p>ERROR 帧的负载格式为：错误码（2 字节无符号大端）+ UTF-8 错误信息。
+ * 标准错误码定义见 {@link ErrorCode}。</p>
  *
  * <p>数据长度是转义后的段落内容字节数，接收方按该长度精确读取，
  * 因此流 ID、序号和负载中出现 0xFF 0xEE 也不会被误判为通信尾。
@@ -86,8 +89,8 @@ public final class SocketFrame {
     /** 转义字节：段落内容中的特殊字节前都会添加该字节。 */
     public static final int ESCAPE = 0xCD;
 
-    /** 当前协议版本。增加流式元数据和长度字段后升级为 0x0003。 */
-    public static final int VERSION = 0x0003;
+    /** 当前协议版本。ERROR 帧加入标准错误码后升级为 0x0004。 */
+    public static final int VERSION = 0x0004;
 
     /** 不压缩。 */
     public static final int COMPRESSION_NONE = 0x00;
@@ -164,6 +167,7 @@ public final class SocketFrame {
         this.sequence = header.sequence;
         this.payload = unescape(Arrays.copyOfRange(frame, PREFIX_LENGTH,
                 PREFIX_LENGTH + (int) header.payloadLength));
+        validateErrorPayload(this.type, this.payload);
         this.bytes = frame.clone();
     }
 
@@ -178,6 +182,7 @@ public final class SocketFrame {
         if (this.type == TYPE_END && this.payload.length != 0) {
             throw new IllegalArgumentException("END 帧不能携带数据");
         }
+        validateErrorPayload(this.type, this.payload);
         if (this.payload.length > MAX_FRAME_LENGTH - FIXED_LENGTH) {
             throw new IllegalArgumentException("段落内容过长：" + this.payload.length
                     + " > " + (MAX_FRAME_LENGTH - FIXED_LENGTH));
@@ -199,6 +204,7 @@ public final class SocketFrame {
         this.streamId = header.streamId;
         this.sequence = header.sequence;
         this.payload = Objects.requireNonNull(payload, "payload").clone();
+        validateErrorPayload(this.type, this.payload);
         this.bytes = encode();
     }
 
@@ -240,12 +246,29 @@ public final class SocketFrame {
     }
 
     /**
-     * 构造 ERROR 帧，错误文本按 UTF-8 编码。
+     * 构造 ERROR 帧，使用 {@link ErrorCode#UNSPECIFIED} 错误码。
      */
     public static SocketFrame error(long streamId, long sequence, String message) {
+        return error(streamId, sequence, ErrorCode.UNSPECIFIED, message);
+    }
+
+    /**
+     * 构造带标准错误码的 ERROR 帧。负载格式为：错误码（2 字节大端）+ UTF-8 错误信息。
+     *
+     * @param errorCode 0..0xFFFF 的无符号错误码
+     * @param message   UTF-8 错误信息
+     */
+    public static SocketFrame error(long streamId, long sequence, int errorCode, String message) {
         Objects.requireNonNull(message, "message");
-        return new SocketFrame(TYPE_ERROR, streamId, sequence,
-                message.getBytes(StandardCharsets.UTF_8), now());
+        if (errorCode < 0 || errorCode > 0xFFFF) {
+            throw new IllegalArgumentException("错误码超出 2 字节无符号范围：" + errorCode);
+        }
+        byte[] text = message.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[2 + text.length];
+        payload[0] = (byte) ((errorCode >>> 8) & 0xFF);
+        payload[1] = (byte) (errorCode & 0xFF);
+        System.arraycopy(text, 0, payload, 2, text.length);
+        return new SocketFrame(TYPE_ERROR, streamId, sequence, payload, now());
     }
 
     /**
@@ -771,9 +794,42 @@ public final class SocketFrame {
 
     /**
      * 按 UTF-8 解码段落内容。
+     *
+     * <p>ERROR 帧的负载以 2 字节错误码开头；读取 ERROR 文本请使用
+     * {@link #getErrorMessage()}，读取错误码请使用 {@link #getErrorCode()}。</p>
      */
     public String getPayloadAsString() {
         return new String(payload, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * @return ERROR 帧的 2 字节无符号错误码
+     * @throws IllegalStateException 当前帧不是 ERROR 帧
+     */
+    public int getErrorCode() {
+        requireErrorFrame();
+        return readUnsignedShort(payload, 0);
+    }
+
+    /**
+     * @return ERROR 帧的 UTF-8 错误信息
+     * @throws IllegalStateException 当前帧不是 ERROR 帧
+     */
+    public String getErrorMessage() {
+        requireErrorFrame();
+        return new String(payload, 2, payload.length - 2, StandardCharsets.UTF_8);
+    }
+
+    private void requireErrorFrame() {
+        if (type != TYPE_ERROR) {
+            throw new IllegalStateException("当前帧不是 ERROR 帧");
+        }
+    }
+
+    private static void validateErrorPayload(int type, byte[] payload) {
+        if (type == TYPE_ERROR && payload.length < 2) {
+            throw new IllegalArgumentException("ERROR 帧负载至少需要 2 字节错误码");
+        }
     }
 
     /**

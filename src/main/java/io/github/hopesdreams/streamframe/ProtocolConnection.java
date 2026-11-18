@@ -64,6 +64,9 @@ import java.util.Objects;
  *
  * <p>同一条连接上的请求/响应按顺序使用：读取或关闭上一个 {@link Response}
  * 后，再发起下一个请求。</p>
+ *
+ * <p>ERROR 帧携带 2 字节错误码和 UTF-8 错误信息；{@link Response} 收到
+ * ERROR 时抛出 {@link ProtocolException}。</p>
  */
 public final class ProtocolConnection implements Closeable {
     /** 单个 DATA 帧的最大原始负载，避免转义后超过 1 MiB 的帧上限。 */
@@ -162,11 +165,11 @@ public final class ProtocolConnection implements Closeable {
         }
 
         if (frame.getType() != SocketFrame.TYPE_REQUEST) {
-            throw reject(frame, "期望 REQUEST 帧，收到类型 0x"
-                    + String.format("%02X", frame.getType()));
+            throw reject(frame, ErrorCode.INVALID_REQUEST,
+                    "期望 REQUEST 帧，收到类型 0x" + String.format("%02X", frame.getType()));
         }
         if (frame.getSequence() != 0) {
-            throw reject(frame, "REQUEST 帧序号必须为 0");
+            throw reject(frame, ErrorCode.PROTOCOL_ERROR, "REQUEST 帧序号必须为 0");
         }
 
         byte[] payload;
@@ -219,14 +222,15 @@ public final class ProtocolConnection implements Closeable {
     /**
      * 丢弃非法帧并回一个 ERROR 帧，然后把异常交给调用方。
      */
-    private IOException reject(SocketFrame.FrameReader frame, String message) throws IOException {
+    private IOException reject(SocketFrame.FrameReader frame, int errorCode,
+                               String message) throws IOException {
         long streamId = frame.getStreamId();
         try {
             frame.close();
         } catch (IllegalArgumentException e) {
             throw new IOException("协议数据非法：" + e.getMessage(), e);
         }
-        send(SocketFrame.error(streamId, 0, message));
+        send(SocketFrame.error(streamId, 0, errorCode, message));
         return new IOException(message);
     }
 
@@ -350,12 +354,19 @@ public final class ProtocolConnection implements Closeable {
         }
 
         /**
-         * 发送 ERROR 帧并结束回复。
+         * 发送 ERROR 帧并结束回复，使用 {@link ErrorCode#UNSPECIFIED} 错误码。
          */
         public void error(String message) throws IOException {
+            error(ErrorCode.UNSPECIFIED, message);
+        }
+
+        /**
+         * 发送带标准错误码的 ERROR 帧并结束回复。
+         */
+        public void error(int errorCode, String message) throws IOException {
             Objects.requireNonNull(message, "message");
             ensureOpen();
-            connection.send(SocketFrame.error(streamId, sequence, message));
+            connection.send(SocketFrame.error(streamId, sequence, errorCode, message));
             closed = true;
         }
 
@@ -445,10 +456,9 @@ public final class ProtocolConnection implements Closeable {
                             closeFrame(frame);
                             return -1;
                         case SocketFrame.TYPE_ERROR:
-                            String error;
+                            byte[] errorPayload;
                             try {
-                                error = new String(ProtocolConnection.readAll(frame),
-                                        StandardCharsets.UTF_8);
+                                errorPayload = ProtocolConnection.readAll(frame);
                             } catch (IOException e) {
                                 finished = true;
                                 throw e;
@@ -456,9 +466,16 @@ public final class ProtocolConnection implements Closeable {
                                 finished = true;
                                 throw new IOException("协议数据非法：" + e.getMessage(), e);
                             }
+                            if (errorPayload.length < 2) {
+                                finished = true;
+                                throw new IOException("ERROR 帧负载长度不足，缺少错误码");
+                            }
+                            int errorCode = ((errorPayload[0] & 0xFF) << 8)
+                                    | (errorPayload[1] & 0xFF);
+                            String errorMessage = new String(errorPayload, 2,
+                                    errorPayload.length - 2, StandardCharsets.UTF_8);
                             finished = true;
-                            closeFrame(frame);
-                            throw new IOException("服务端错误：" + error);
+                            throw new ProtocolException(errorCode, errorMessage);
                         default:
                             finished = true;
                             closeFrame(frame);

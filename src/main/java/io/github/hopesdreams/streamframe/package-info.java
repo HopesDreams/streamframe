@@ -23,6 +23,8 @@
  *
  * <p>{@link io.github.hopesdreams.streamframe.ProtocolConnection} is the high-level
  * API; {@link io.github.hopesdreams.streamframe.SocketFrame} is the low-level frame
- * codec.</p>
+ * codec. ERROR frames use the standard codes in
+ * {@link io.github.hopesdreams.streamframe.ErrorCode} and surface as
+ * {@link io.github.hopesdreams.streamframe.ProtocolException}.</p>
  */
 package io.github.hopesdreams.streamframe;
